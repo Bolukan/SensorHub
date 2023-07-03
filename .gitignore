@@ -34,3 +34,5 @@
 WiFiConfig.h
 .gcc-flags.json
 .clang_complete
+.pio/*
+.vscode/*

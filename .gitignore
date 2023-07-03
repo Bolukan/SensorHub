@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+WiFiConfig.h
+.gcc-flags.json
+.clang_complete

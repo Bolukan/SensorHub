@@ -1,5 +1,5 @@
 # SensorHub
-![Travis build](https://app.travis-ci.com/Bolukan/SensorHub.svg)
+![Travis build](https://app.travis-ci.com/Bolukan/SensorHub.svg) ![License](https://img.shields.io/github/license/Bolukan/SensorHub.svg)
 
 SensorHub is responsible for interpreting readings from multiple sensors and transmitting them via MQTT. It can serve as an example of how to solve such a problem.
 

@@ -31,7 +31,15 @@
 *.out
 *.app
 
+# Compiled code
+*.bin
+
+# secrets or local
 WiFiConfig.h
+versioning
+include/version.h
+
+# IDE files
 .gcc-flags.json
 .clang_complete
 .pio/*

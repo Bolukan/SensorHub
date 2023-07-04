@@ -28,7 +28,7 @@ install:
     - pip install -U platformio
     - pio pkg install --library "knolleary/PubSubClient@^2.8"
     - pio pkg install --library "sstaub/TickTwo@^4.4.0"
-    - platformio update
+    - pio pkg update
 
 script:
     - pio run

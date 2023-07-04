@@ -26,6 +26,22 @@ const long INTERVAL_LED = 50;
 // mqtt
 const char WILL_TOPIC[] = "sensor/esp32s2";
 
+// ADC values
+// An active sensor measures 3300-3400 and an inactive sensor measures 5000-5200.
+
+const uint16_t ADC_LOW_ACTIVE = 2500;
+const uint16_t ADC_ACTIVE_INACTIVE = 4200;
+const uint16_t ADC_INACTIVE = 5100;
+const uint16_t ADC_INACTIVE_HIGH = 6000;
+
+enum state_sensor {
+  unknown,
+  STATE_LOW,       // 0000-2499 = too low - invalid
+  STATE_ACTIVE,    // 2500-4199 = 3300-3400 - active
+  STATE_INACTIVE,  // 4200-5999 = 5000-5200 - inactive
+  STATE_HIGH       // 6000-8191 = too high - invalid
+};
+
 // pins
 #define COUNT_PINS 6
 #define SENSORTYPE_PIR "pir"
@@ -37,6 +53,7 @@ const uint8_t GPIO_S3 = 7;
 const uint8_t GPIO_S4 = 9;
 const uint8_t GPIO_S5 = 11;
 const uint8_t GPIO_S6 = 12;
+const uint8_t ADC_Pins[] = {GPIO_S1, GPIO_S2, GPIO_S3, GPIO_S4, GPIO_S5, GPIO_S6};
 
 const uint8_t LED_CONN = 1;
 const uint8_t LED_MQTT = 2;
@@ -47,34 +64,19 @@ const uint8_t LED_S3 = 10;
 const uint8_t LED_S4 = 8;
 const uint8_t LED_S5 = 6;
 const uint8_t LED_S6 = 4;
+const uint8_t LED_Pins[] = {LED_S1, LED_S2, LED_S3, LED_S4, LED_S5, LED_S6};
 
-const uint8_t ADC_Pins[] = {GPIO_S1, GPIO_S2, GPIO_S3, GPIO_S4, GPIO_S5, GPIO_S6};
 const String SensorName[] = {"A1", "A2", "A3", "A4", "A5", "A6"};
 const String SensorType[] = {SENSORTYPE_PIR, SENSORTYPE_PIR, SENSORTYPE_PIR, SENSORTYPE_CONTACT, SENSORTYPE_CONTACT, SENSORTYPE_PIR};
 const String SensorLocation[] = {"Hal", "Lounge", "Keuken", "Achterdeur", "Garagedeur", "Garage"};
-
-// ADC values
-const uint16_t ADC_LOW_ACTIVE = 2500;
-const uint16_t ADC_ACTIVE_INACTIVE = 4200;
-const uint16_t ADC_INACTIVE = 5100;
-const uint16_t ADC_INACTIVE_HIGH = 6000;
-
-enum state_sensor {
-  unknown,
-  STATE_LOW,       // 0000-2499 = low
-  STATE_ACTIVE,    // 2500-4199 = 3300-3400 - active
-  STATE_INACTIVE,  // 4200-5999 = 5000-5200 - inactive
-  STATE_HIGH       // 6000-8191 = high
-};
 
 // ******************** globals ********************
 
 // WiFi and MQTT
 WiFiClient ethClient;
 PubSubClient client(ethClient);
-char ssid[18] = {0}; // ssid in format "12:34:56:78:9a:bc"
-char deviceid[7] = {0}; // ssid in format "789abc"
-String clientId;
+char ssid[18] = {0}; // ssid in format "12:34:56:78:9a:bc", part of mqtt message
+String clientId; // mqtt client identifier
 
 // ADC pins
 uint16_t ADC[COUNT_PINS] = {ADC_INACTIVE};
@@ -86,17 +88,25 @@ MyLed ledMQTT(LED_MQTT);
 MyLed ledConn(LED_CONN);
 MyLed ledSensor[6] = { MyLed(LED_S1), MyLed(LED_S2), MyLed(LED_S3), MyLed(LED_S4), MyLed(LED_S5), MyLed(LED_S6)};
 
-// loop
+// current time
 unsigned long currentMillis = millis();
-unsigned long previousADC = 0;
-unsigned long previousPrint = 0;
+// last time ADC's read
+unsigned long previousADC = 0; 
+// unsigned long previousPrint = 0;
+// last time the sensor was reported - used to report periodically
 unsigned long previousPin[COUNT_PINS] = {0};
-unsigned long previousLed = 0;
 
 // ******************** functions ********************
 
 // MQTT
 
+/**
+ * @brief debug print mqtt messages received
+ * 
+ * @param topic topic
+ * @param payload message
+ * @param length length of message
+ */
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -107,6 +117,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 }
 
+/**
+ * @brief connect to MQTT
+ * 
+ */
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
@@ -122,13 +136,19 @@ void reconnect() {
       Serial.print(client.state());
       Serial.println(" try again");
       // Wait before retrying
-      ledConn.loop();
       delay(100);
     }
+    ledConn.loop();
   }
 }
 
-void publishPIR(int id, state_sensor sensor)
+/**
+ * @brief MQTT publish PIR message
+ * 
+ * @param id sensor id
+ * @param sensor state of the sensor
+ */
+void publishPIR(const int id, const state_sensor sensor)
 {
   String topic = "sensor/" + SensorName[id];
   String valueOccupancy = (sensor==STATE_ACTIVE) ? "true" : "false";
@@ -140,7 +160,13 @@ void publishPIR(int id, state_sensor sensor)
   client.publish(topic.c_str(), payload.c_str());
 }
 
-void publishcontact(int id, state_sensor sensor)
+/**
+ * @brief MQTT publish contact message
+ * 
+ * @param id sensor id
+ * @param sensor state of the sensor
+ */
+void publishcontact(const int id, const state_sensor sensor)
 {
   String topic = "sensor/" + SensorName[id];
   String valueContact = (sensor==STATE_ACTIVE) ? "false" : "true";
@@ -152,7 +178,13 @@ void publishcontact(int id, state_sensor sensor)
   client.publish(topic.c_str(), payload.c_str());
 }
 
-void publishState(int id, state_sensor sensor) {
+/**
+ * @brief MQTT publish sensor message
+ * 
+ * @param id sensor id
+ * @param sensor state of the sensor
+ */
+void publishState(const int id, const state_sensor sensor) {
   ledMQTT.On();
   if (SensorType[id] == SENSORTYPE_PIR) publishPIR(id, sensor);
   if (SensorType[id] == SENSORTYPE_CONTACT) publishcontact(id, sensor);
@@ -160,12 +192,21 @@ void publishState(int id, state_sensor sensor) {
   ledMQTT.Off();
 }
 
-// set ssid, deviceid, clientId
-void getssid() {
+/**
+ * @brief set ssid and clientId
+ * 
+ * @param ssid ssid in mqtt message
+ * @param clientId MQTT client id 
+ */
+void getssid(char (& ssid)[18], String clientId) 
+{
   uint8_t baseMac[6];
+  char deviceid[7] = {0}; // ssid in format "789abc"
   // Get MAC address for WiFi station
   esp_read_mac(baseMac, ESP_MAC_WIFI_STA);
+  // ssid
   sprintf(ssid, "%02x:%02x:%02x:%02x:%02x:%02x", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+  // clientId
   sprintf(deviceid, "%02x%02x%02x", baseMac[3], baseMac[4], baseMac[5]);
   clientId = String("esp") + String(deviceid);
 }
@@ -173,28 +214,29 @@ void getssid() {
 // ******************** setup and loop ********************
 
 void setup() {
+  // led
+  ledConn.Blink(500);
+  ledMQTT.Off();
+  
   Serial.begin(115200);
-  delay(2000);
+  //delay(2000);
   Serial.println();
   Serial.println(APPNAME);
   Serial.println(VERSION);
   Serial.println();
-
-  // led
-  ledConn.Blink(500);
-  ledMQTT.Off();
 
   // WiFi
   Serial.printf("Connecting to WiFi SSID: %s\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWD);
   while (!WiFi.isConnected()) {
     Serial.print(".");
+    ledConn.loop();
     delay(200);
   }
   Serial.println();
   ledConn.Blink(100);
 
-  getssid();
+  getssid(ssid, clientId);
 
   // mqtt
   client.setServer(MQTT_SERVER, 1883);
@@ -203,6 +245,16 @@ void setup() {
   ledConn.On();
 
 }  // void setup()
+
+
+// calculate the state of the sensor based on the ADC reading
+state_sensor CalculateState(const uint16_t avgADC) {
+  if (avgADC < ADC_LOW_ACTIVE) return STATE_LOW;
+  if (avgADC < ADC_ACTIVE_INACTIVE) return STATE_ACTIVE;
+  if (avgADC < ADC_INACTIVE_HIGH) return STATE_INACTIVE;
+  return STATE_HIGH;
+}
+
 
 void loop() {
   // run mqtt
@@ -218,6 +270,8 @@ void loop() {
     
     // read pins
     for (int id = 0; id < COUNT_PINS; id++) {
+      // update sensor led
+      //ledSensor[id].loop();
       // read pin
       ADC[id] = analogRead(ADC_Pins[id]);
       avgADC[id] -= avgADC[id] >> 4;
@@ -225,27 +279,10 @@ void loop() {
       delay(0);
 
       // calculate state
-      state_sensor new_state;
-      if (avgADC[id] < ADC_LOW_ACTIVE)
-      {
-        new_state = STATE_LOW;
-        ledSensor[id].Off();
-      }
-      else if (avgADC[id] < ADC_ACTIVE_INACTIVE)
-      {
-        new_state = STATE_ACTIVE;
-        ledSensor[id].On();
-      }
-      else if (avgADC[id] < ADC_INACTIVE_HIGH)
-      {
-        new_state = STATE_INACTIVE;
-        ledSensor[id].Off(); 
-      }
-      else
-      {
-        new_state = STATE_HIGH;
-        ledSensor[id].Off();
-      }
+      state_sensor new_state = CalculateState(avgADC[id]);
+      
+      // update LED
+      (new_state == STATE_ACTIVE) ? ledSensor[id].On() : ledSensor[id].Off();
 
       // changed state
       if (sensor[id] != new_state) {
@@ -265,23 +302,5 @@ void loop() {
       publishState(id, sensor[id]);
     }
   }
-
-  /*
-  // Print the pins
-  currentMillis = millis();
-  if (currentMillis - previousPrint >= INTERVAL_PRINT) {
-    previousPrint = currentMillis;
-
-    Serial.print("ADC's = ");
-    for (int id = 0; id < COUNT_PINS; id++) {
-      Serial.printf(" %d:%04d ", id, ADC[id]);
-    }
-    // Time passed
-    // Serial.print(" Time passed: ");
-    // currentMillis = millis();
-    // Serial.print(currentMillis - previousPrint);
-    Serial.println();
-  }
-  */
 
 }  // void loop()

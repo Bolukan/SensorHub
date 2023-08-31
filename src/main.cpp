@@ -20,6 +20,7 @@
 // timers
 const long INTERVAL_ADC = 40;
 const long INTERVAL_PIN = 1000 * 60 * 5;
+const long INTERVAL_WIFI_CONNECT = 1000 * 60; // minute
 
 // mqtt
 const char WILL_TOPIC[] = "sensor/esp32s2";
@@ -75,6 +76,7 @@ WiFiClient ethClient;
 PubSubClient client(ethClient);
 char ssid[18] = {0}; // ssid in format "12:34:56:78:9a:bc", part of mqtt message
 String clientId; // mqtt client identifier
+unsigned long LastWiFiConnect = 0;
 
 // ADC pins
 uint16_t ADC[COUNT_PINS] = {ADC_INACTIVE};
@@ -118,7 +120,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
  * @brief connect to MQTT
  * 
  */
-void reconnect() {
+void reconnectmqtt() {
   // Loop until we're reconnected
   while (!client.connected()) {
     ledConn.Blink(500);
@@ -163,10 +165,12 @@ void publishState(const int id, const state_sensor sensor) {
     payload += ",\"contact\":" + valueContact;
   }
 
-   payload += "}";
+  payload += "}";
   
-  client.publish(topic.c_str(), payload.c_str());
-  
+  if (WiFi.status() == WL_CONNECTED) {
+    client.publish(topic.c_str(), payload.c_str());
+  }
+
   delay(0);
   ledMQTT.Off();
 }
@@ -220,7 +224,7 @@ void setup() {
   // mqtt
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
-  reconnect();
+  reconnectmqtt();
   ledConn.On();
 
 }  // void setup()
@@ -273,10 +277,32 @@ void PublishUnchangedPins() {
   } 
 }
 
+void reconnectwifi() {
+  // if WiFi is down, try reconnecting
+  if (WiFi.status() != WL_CONNECTED) {
+    ledConn.Off();
+    unsigned long currentMillis = millis();
+    if (currentMillis - LastWiFiConnect >= INTERVAL_WIFI_CONNECT) {
+        Serial.print(currentMillis);
+        Serial.println("Reconnecting to WiFi...");
+        WiFi.disconnect();
+        WiFi.reconnect();
+        LastWiFiConnect = currentMillis;
+      }
+  } else {
+    ledConn.On();
+  }
+}
+
 void loop() {
+  // check wifi
+  reconnectwifi();
   // run mqtt
-  reconnect();
-  client.loop();
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    reconnectmqtt();
+    client.loop();
+  }
   // run leds
   ledConn.loop();
   ledMQTT.loop();

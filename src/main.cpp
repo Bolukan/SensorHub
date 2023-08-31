@@ -3,7 +3,7 @@
 #endif
 
 // ******************** compiler ********************
-#define APPNAME "Sensor ADC"
+#define APP_NAME "Sensor ADC"
 #include <version.h>  // include BUILD_NUMBER, VERSION, VERSION_SHORT
 
 // ********************  INCLUDE  ********************
@@ -17,37 +17,53 @@
 
 // ******************** constants ********************
 
-// timers
-const long INTERVAL_ADC = 40;
-const long INTERVAL_PIN = 1000 * 60 * 5;
-const long INTERVAL_WIFI_CONNECT = 1000 * 60; // minute
-
-// mqtt
-const char WILL_TOPIC[] = "sensor/esp32s2";
-
 // sensors
-#define COUNT_PINS 6
+#define SENSOR_COUNT 6
 #define SENSORTYPE_PIR "pir"
 #define SENSORTYPE_CONTACT "contact"
 
-const String SensorName[] = {"A1", "A2", "A3", "A4", "A5", "A6"};
-const String SensorType[] = {SENSORTYPE_PIR, SENSORTYPE_PIR, SENSORTYPE_PIR, SENSORTYPE_CONTACT, SENSORTYPE_CONTACT, SENSORTYPE_PIR};
-const String SensorLocation[] = {"Hal", "Lounge", "Keuken", "Achterdeur", "Garagedeur", "Garage"};
+enum class SensorType {
+  PIR,
+  CONTACT
+};
 
-// ADC values
-// An active sensor measures 3300-3400 and an inactive sensor measures 5000-5200.
-const uint16_t ADC_LOW_ACTIVE = 2500;
-const uint16_t ADC_ACTIVE_INACTIVE = 4200;
-const uint16_t ADC_INACTIVE = 5100;
-const uint16_t ADC_INACTIVE_HIGH = 6000;
-
-enum state_sensor {
-  unknown,
+enum class SensorState {
+  UNKNOWN,
   STATE_LOW,       // 0000-2499 = too low - invalid
   STATE_ACTIVE,    // 2500-4199 = 3300-3400 - active
   STATE_INACTIVE,  // 4200-5999 = 5000-5200 - inactive
   STATE_HIGH       // 6000-8191 = too high - invalid
 };
+
+struct SensorInfo {
+  String sensorName;
+  SensorType sensorType;
+  String sensorLocation;
+  uint8_t analogPin;
+  uint8_t statusLedPin;
+};
+
+struct SensorData {
+  uint16_t currentADCValue;
+  uint16_t averageADCValue;
+  SensorState currentState;
+  MyLed statusLed;
+  unsigned long previousReportTime; // last time the sensor was reported to initiate a periodic report
+};
+
+// timers
+const long ADC_READ_INTERVAL_MS = 40;
+const long PUBLISH_INTERVAL_MS = 1000 * 60 * 5;
+const long WIFI_RECONNECT_INTERVAL_MS = 1000 * 60; // minute
+
+// mqtt
+const char MQTT_WILL_TOPIC[] = "sensor/esp32s2";
+
+// ADC values
+const uint16_t MIN_ACTIVE_ADC_VALUE = 2500;
+const uint16_t MIN_INACTIVE_ADC_VALUE = 4200;
+const uint16_t MAX_INACTIVE_ADC_VALUE = 5100;
+const uint16_t MAX_HIGH_ADC_VALUE = 6000;
 
 // pins
 const uint8_t GPIO_S1 = 3;
@@ -56,7 +72,6 @@ const uint8_t GPIO_S3 = 7;
 const uint8_t GPIO_S4 = 9;
 const uint8_t GPIO_S5 = 11;
 const uint8_t GPIO_S6 = 12;
-const uint8_t ADC_Pins[] = {GPIO_S1, GPIO_S2, GPIO_S3, GPIO_S4, GPIO_S5, GPIO_S6};
 
 const uint8_t LED_CONN = 1;
 const uint8_t LED_MQTT = 2;
@@ -67,33 +82,42 @@ const uint8_t LED_S3 = 10;
 const uint8_t LED_S4 = 8;
 const uint8_t LED_S5 = 6;
 const uint8_t LED_S6 = 4;
-const uint8_t LED_Pins[] = {LED_S1, LED_S2, LED_S3, LED_S4, LED_S5, LED_S6};
+
+const SensorInfo sensors[SENSOR_COUNT] = {
+  {"A1", SensorType::PIR, "Hal", GPIO_S1, LED_S1},
+  {"A2", SensorType::PIR, "Lounge", GPIO_S2, LED_S2},
+  {"A3", SensorType::PIR, "Keuken", GPIO_S3, LED_S3},
+  {"A4", SensorType::CONTACT, "Achterdeur", GPIO_S4, LED_S4},
+  {"A5", SensorType::CONTACT, "Garagedeur", GPIO_S5, LED_S5},
+  {"A6", SensorType::PIR, "Garage", GPIO_S6, LED_S6}
+};
 
 // ******************** globals ********************
 
+SensorData sensorData[SENSOR_COUNT] = {
+  {MAX_INACTIVE_ADC_VALUE, MAX_INACTIVE_ADC_VALUE, SensorState::STATE_INACTIVE, MyLed(LED_S1), 0UL},
+  {MAX_INACTIVE_ADC_VALUE, MAX_INACTIVE_ADC_VALUE, SensorState::STATE_INACTIVE, MyLed(LED_S2), 0UL},
+  {MAX_INACTIVE_ADC_VALUE, MAX_INACTIVE_ADC_VALUE, SensorState::STATE_INACTIVE, MyLed(LED_S3), 0UL},
+  {MAX_INACTIVE_ADC_VALUE, MAX_INACTIVE_ADC_VALUE, SensorState::STATE_INACTIVE, MyLed(LED_S4), 0UL},
+  {MAX_INACTIVE_ADC_VALUE, MAX_INACTIVE_ADC_VALUE, SensorState::STATE_INACTIVE, MyLed(LED_S5), 0UL},
+  {MAX_INACTIVE_ADC_VALUE, MAX_INACTIVE_ADC_VALUE, SensorState::STATE_INACTIVE, MyLed(LED_S6), 0UL}
+};
+
 // WiFi and MQTT
-WiFiClient ethClient;
-PubSubClient client(ethClient);
+WiFiClient mqttClient;
+PubSubClient client(mqttClient);
 char ssid[18] = {0}; // ssid in format "12:34:56:78:9a:bc", part of mqtt message
 String clientId; // mqtt client identifier
-unsigned long LastWiFiConnect = 0;
-
-// ADC pins
-uint16_t ADC[COUNT_PINS] = {ADC_INACTIVE};
-uint16_t avgADC[COUNT_PINS] = {ADC_INACTIVE};
-state_sensor sensor[COUNT_PINS] = {STATE_INACTIVE};
+unsigned long lastWiFiReconnectTime = 0UL;
 
 // led
 MyLed ledMQTT(LED_MQTT);
 MyLed ledConn(LED_CONN);
-MyLed ledSensor[6] = { MyLed(LED_S1), MyLed(LED_S2), MyLed(LED_S3), MyLed(LED_S4), MyLed(LED_S5), MyLed(LED_S6)};
 
 // current time
 unsigned long currentMillis = millis();
 // last time ADC's read
-unsigned long previousADC = 0; 
-// last time the sensor was reported to init a periodically report
-unsigned long previousPin[COUNT_PINS] = {0};
+unsigned long previousADCReadTime = 0UL; 
 
 // ******************** functions ********************
 
@@ -120,16 +144,16 @@ void callback(char* topic, byte* payload, unsigned int length) {
  * @brief connect to MQTT
  * 
  */
-void reconnectmqtt() {
+void reconnectMQTT() {
   // Loop until we're reconnected
   while (!client.connected()) {
     ledConn.Blink(500);
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect(clientId.c_str(), WILL_TOPIC, 1, true, "offline")) {
-      Serial.printf("connected as %s\n", clientId);
+    if (client.connect(clientId.c_str(), MQTT_WILL_TOPIC, 1, true, "offline")) {
+      Serial.printf("connected as %s\n", clientId.c_str());
       // Once connected, publish an announcement...
-      client.publish(WILL_TOPIC, "online", true);
+      client.publish(MQTT_WILL_TOPIC, "online", true);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -145,28 +169,25 @@ void reconnectmqtt() {
  * @brief MQTT publish sensor message
  * 
  * @param id sensor id
- * @param sensor state of the sensor
+ * @param sensorState state of the sensor
  */
-void publishState(const int id, const state_sensor sensor) {
+void publishSensorState(const int id) {
   ledMQTT.On();
-  String topic = "sensor/" + SensorName[id];
+  const SensorInfo &sensorInfo = sensors[id];
+  const SensorData &sensorDataVar = sensorData[id];
+  String topic = "sensor/" + sensorInfo.sensorName;
   String payload = "{\"mac\":\"" + String(ssid) + "\","
-                   + "\"type\":\"" + SensorType[id] + "\","
-                   + "\"location\":\"" + SensorLocation[id] + "\","
-                   + "\"ADC\":" + ADC[id];
-  
-  if (SensorType[id] == SENSORTYPE_PIR) {
-    String valueOccupancy = (sensor == STATE_ACTIVE) ? "true" : "false";
-    payload += ",\"occupancy\":" + valueOccupancy;
+                   + "\"type\":\"" + (sensorInfo.sensorType == SensorType::PIR ? SENSORTYPE_PIR : SENSORTYPE_CONTACT) + "\","
+                   + "\"location\":\"" + sensorInfo.sensorLocation + "\","
+                   + "\"ADC\":" + sensorDataVar.currentADCValue;
+  if (sensorInfo.sensorType == SensorType::PIR) {
+    String jsonValue = (sensorDataVar.currentState == SensorState::STATE_ACTIVE) ? "true" : "false";
+    payload += ",\"occupancy\":" + jsonValue + "}";
+  } else {
+    String jsonValue = (sensorDataVar.currentState == SensorState::STATE_ACTIVE) ? "false" : "true";
+    payload += ",\"contact\":" + jsonValue + "}";
   }
 
-  if (SensorType[id] == SENSORTYPE_CONTACT) {
-    String valueContact = (sensor == STATE_ACTIVE) ? "false" : "true";
-    payload += ",\"contact\":" + valueContact;
-  }
-
-  payload += "}";
-  
   if (WiFi.status() == WL_CONNECTED) {
     client.publish(topic.c_str(), payload.c_str());
   }
@@ -181,7 +202,7 @@ void publishState(const int id, const state_sensor sensor) {
  * @param ssid ssid in mqtt message
  * @param clientId MQTT client id 
  */
-void getssid(char (&ssid)[18], String& clientId) 
+void getSSID(char (&ssid)[18], String& clientId) 
 {
   uint8_t baseMac[6];
   char deviceid[7] = {0}; // ssid in format "789abc"
@@ -204,7 +225,7 @@ void setup() {
   Serial.begin(115200);
   //delay(2000);
   Serial.println();
-  Serial.println(APPNAME);
+  Serial.println(APP_NAME);
   Serial.println(VERSION);
   Serial.println();
 
@@ -219,96 +240,106 @@ void setup() {
   Serial.println();
   ledConn.Blink(100);
 
-  getssid(ssid, clientId);
+  getSSID(ssid, clientId);
 
   // mqtt
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
-  reconnectmqtt();
+  reconnectMQTT();
   ledConn.On();
 
 }  // void setup()
 
-
 // calculate the state of the sensor based on the ADC reading
-state_sensor CalculateState(const uint16_t avgADC) {
-  if (avgADC < ADC_LOW_ACTIVE) return STATE_LOW;
-  if (avgADC < ADC_ACTIVE_INACTIVE) return STATE_ACTIVE;
-  if (avgADC < ADC_INACTIVE_HIGH) return STATE_INACTIVE;
-  return STATE_HIGH;
+SensorState calculateState(const uint16_t averageADC) {
+  if (averageADC < MIN_ACTIVE_ADC_VALUE) return SensorState::STATE_LOW;
+  if (averageADC < MIN_INACTIVE_ADC_VALUE) return SensorState::STATE_ACTIVE;
+  if (averageADC < MAX_INACTIVE_ADC_VALUE) return SensorState::STATE_INACTIVE;
+  return SensorState::STATE_HIGH;
 }
 
-void CheckADCPins() {
+/**
+ * @brief Read sensor and process value
+ * 
+ */
+void checkAnalogPinsAndPublish() {
   // Check ADC pins
   currentMillis = millis();
-  if (currentMillis - previousADC >= INTERVAL_ADC) {
-    previousADC = currentMillis;
+  if (currentMillis - previousADCReadTime >= ADC_READ_INTERVAL_MS) {
+    previousADCReadTime = currentMillis;
 
     // read pins
-    for (int id = 0; id < COUNT_PINS; id++) {
+    for (int id = 0; id < SENSOR_COUNT; id++) {
+      const SensorInfo &sensorInfo = sensors[id];
+      SensorData &sensorDataVar = sensorData[id];
+
       // read pin and calculate state
-      ADC[id] = analogRead(ADC_Pins[id]);
-      avgADC[id] -= avgADC[id] >> 4; // replace 1/16 with new value
-      avgADC[id] += ADC[id] >> 4;
+      sensorDataVar.currentADCValue = analogRead(sensorInfo.analogPin);
+      sensorDataVar.averageADCValue -= sensorDataVar.averageADCValue >> 4; // replace 1/16 with new value
+      sensorDataVar.averageADCValue += sensorDataVar.currentADCValue >> 4;
       delay(0);
-      state_sensor new_state = CalculateState(avgADC[id]);
+      SensorState newSensorState = calculateState(sensorDataVar.averageADCValue);
 
       // publish a changed state
-      if (sensor[id] != new_state) {
+      if (sensorDataVar.currentState != newSensorState) {
         // update LED
-        (new_state == STATE_ACTIVE) ? ledSensor[id].On() : ledSensor[id].Off();
+        (newSensorState == SensorState::STATE_ACTIVE) ? sensorDataVar.statusLed.On() : sensorDataVar.statusLed.Off();
         // publish state
-        publishState(id, new_state);
-        sensor[id] = new_state;
-        previousPin[id] = millis();
+        sensorDataVar.currentState = newSensorState;
+        publishSensorState(id);
+        sensorDataVar.previousReportTime = millis();
       }
     }
   }
 }
 
-void PublishUnchangedPins() {
+void publishUnchangedPins() {
   // publish unchanged pins (after 5 minutes)
   currentMillis = millis();
-  for (int id = 0; id < COUNT_PINS; id++) {
-    if (currentMillis - previousPin[id] >= INTERVAL_PIN) {
-      publishState(id, sensor[id]);
-      previousPin[id] = currentMillis;
+
+  for (int id = 0; id < SENSOR_COUNT; id++) {
+    // const SensorInfo &sensorInfo = sensors[id];
+    SensorData &sensorDataVar = sensorData[id];
+
+    if (currentMillis - sensorDataVar.previousReportTime >= PUBLISH_INTERVAL_MS) {
+      publishSensorState(id);
+      sensorDataVar.previousReportTime = currentMillis;
     }
-  } 
+  }
 }
 
-void reconnectwifi() {
+void reconnectWiFi() {
   // if WiFi is down, try reconnecting
   if (WiFi.status() != WL_CONNECTED) {
     ledConn.Off();
     unsigned long currentMillis = millis();
-    if (currentMillis - LastWiFiConnect >= INTERVAL_WIFI_CONNECT) {
+    if (currentMillis - lastWiFiReconnectTime >= WIFI_RECONNECT_INTERVAL_MS) {
         Serial.print(currentMillis);
-        Serial.println("Reconnecting to WiFi...");
+        Serial.println(" Reconnecting to WiFi...");
         WiFi.disconnect();
         WiFi.reconnect();
-        LastWiFiConnect = currentMillis;
+        lastWiFiReconnectTime = currentMillis;
       }
   } else {
     ledConn.On();
   }
-}
+}  // void reconnectWiFi()
 
 void loop() {
   // check wifi
-  reconnectwifi();
+  reconnectWiFi();
   // run mqtt
   if (WiFi.status() == WL_CONNECTED)
   {
-    reconnectmqtt();
+    reconnectMQTT();
     client.loop();
   }
   // run leds
   ledConn.loop();
   ledMQTT.loop();
 
-  CheckADCPins();
+  checkAnalogPinsAndPublish();
 
-  PublishUnchangedPins();
+  publishUnchangedPins();
 
 }  // void loop()
